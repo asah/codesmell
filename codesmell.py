@@ -112,7 +112,7 @@ def parse_args():
                         help="display the charset being used.  Other chars are mapped to backspace.")
     parser.add_argument("--raw", action=ActionYesNo, default=False,
                         help=("(action=predict) assume input is raw text instead of tab-separated commit triplets."+
-                              "  sets--max-len-per-line=200 and  --max-lines-per-commit=10000"))
+                              "  sets--max-len-per-line=200 and  --max-lines-per-commit=5000"))
     parser.add_argument("--details", action=ActionYesNo, default=True,
                         help="display per-commit details")
     parser.add_argument("--array", action=ActionYesNo, default=True,
@@ -177,7 +177,7 @@ def parse_args():
             sys.exit(1)
     if args.raw:
         args.max_len_per_line = 200
-        args.max_lines_per_commit = 10000
+        args.max_lines_per_commit = 5000
         args.details = False
 
     # post-processing args, e.g. --test
@@ -209,7 +209,7 @@ def load_raw_commits():
     raw_commits = []
     start_ts = current_ts = datetime.datetime.now()
 
-    if ARGS.raw:
+    if ARGS.raw or re.search(r'(txt|diff|patch)$', ARGS.filename):
         # put into triplet form: <commit hash> <tab> <unused: sentiment> <tab> <text>
         fh = sys.stdin if ARGS.filename == '-' else open(ARGS.filename, 'rb')
         raw_commits.append("ffffff\t0\t" + "\\n".join([re.sub(r'[\r\n]', '', line) for line in fh]))
@@ -445,6 +445,7 @@ if __name__ == '__main__':
         res = (res * 100.0).flatten().tolist()
         threshold = 30.0
         confusion={}
+        num_smelly = num_clean = 0
         for i, commit in enumerate(commits):
             hash = commit_hashes[i]
             if ARGS.saliency and is_saliency_hash(hash):
@@ -452,31 +453,29 @@ if __name__ == '__main__':
             elif ARGS.details:
                 print("{:3.0f}% smelly, actual={}: {}: {}...".format(res[i], sentiments[i], hash, strpoem("\\n".join(commit))))
             if int(sentiments[i]) > 0:
+                num_smelly += 1
                 if res[i] > threshold:
                     confusion['is_smelly_forecast_smelly'] = confusion.get('is_smelly_forecast_smelly', 0) + 1
                 else:
-                    confusion['is_clean_forecast_smelly'] = confusion.get('is_clean_forecast_smelly', 0) + 1
-            else:
-                if res[i] > threshold:
                     confusion['is_smelly_forecast_clean'] = confusion.get('is_smelly_forecast_clean', 0) + 1
+            else:
+                num_clean += 1
+                if res[i] > threshold:
+                    confusion['is_clean_forecast_smelly'] = confusion.get('is_clean_forecast_smelly', 0) + 1
                 else:
                     confusion['is_clean_forecast_clean'] = confusion.get('is_clean_forecast_clean', 0) + 1
-        forecast_smelly = sum([x>threshold for x in res])
-        forecast_clean = len(res) - forecast_smelly
-        num_smelly = sum(int(sentiments[i])>0 for i in range(len(commits)))
-        num_clean = len(res) - num_smelly
         if ARGS.array:
             if len(commits) == 1:
-                print("forecast={} ({}%)".format("smelly" if forecast_smelly else "clean", res[0]))
+                print("forecast={} ({}%)".format("smelly" if res[0]>threshold else "clean", res[0]))
             else:
                 print("{} smelly. Forecasts: {}".format(100.0*num_smelly/len(res), " ".join(["{:2.0f}".format(x) for x in res])))
             
         if ARGS.confusion:
             isfs = confusion.get('is_smelly_forecast_smelly', 0)
             isfc = confusion.get('is_smelly_forecast_clean', 0)
-            print("is-smelly: {}.  forecast-smelly: {} ({:.1f}%),  forecast-clean: {} ({:.1f}%)".format(
+            print("is-smelly: {}.  forecast-smelly: {} ({:.1f}%), forecast-clean: {} ({:.1f}%)".format(
                 num_smelly, isfs, 100.0*isfs/num_smelly if num_smelly>0 else 0, isfc, 100.0*isfc/num_smelly if num_smelly>0 else 0))
             icfs = confusion.get('is_clean_forecast_smelly', 0)
             icfc = confusion.get('is_clean_forecast_clean', 0)
-            print("is-clean: {}.  forecast-smelly: {} ({:.1f}%),  forecast-clean: {} ({:.1f}%)".format(
+            print("is-clean:  {}.  forecast-smelly: {} ({:.1f}%), forecast-clean: {} ({:.1f}%)".format(
                 num_clean, icfs, 100.0*icfs/num_clean if num_clean>0 else 0, icfc, 100.0*icfc/num_clean if num_clean>0 else 0))
