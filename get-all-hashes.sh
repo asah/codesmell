@@ -12,8 +12,4 @@ fi
 typ=`basename $dir`  # e.g. c_and_cpp
 
 # subdirs that look like repos...
-for repo in `ls -1 -d */.git|perl -ne 's@/.git@@;print;'`; do
-    echo $repo
-    cd $dir/$repo
-    ../../get-hashes.sh $typ
-done
+ls -1 -d */.git|perl -ne 's@/.git@@;print;' | xargs --max-procs=16 -n 1 ../get-hashes.sh $typ 
