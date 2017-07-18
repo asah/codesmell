@@ -13,27 +13,28 @@
 # ==> re-create githubLabeledTrainData.tsv
 # 
 
-if [ $# == 0 ]; then echo "Usage: get-hashes.sh <c|java|python|...> [directory]"; exit 1; fi  # default to current directory
+if [ $# == 0 ]; then
+    echo "Usage: $0 <c|java|python|...> [repo directory]";
+    exit 1
+fi
 
 DBG=0   # set to 1 for debugging
 CLEANDIR=./clean-commits
 FIXDIR=./fix-commits
+GET_ONE_COMMIT=../../get-commit.sh   # relative to each repo directory
+ALL_HASHES=all-hashes.txt
 FILETYPE=$1
 DIR=$2
 if [ "x$DIR" = "x" ]; then DIR=.; fi  # default to current directory
 
-ext=unknown
-if [ "x$FILETYPE" = "xpython" ]; then    ext='"*.py"';    fi
-if [ "x$FILETYPE" = "xjava" ]; then      ext='"*.java"';  fi
-if [ "x$FILETYPE" = "xc_and_cpp" ]; then ext='"*.c" "*.cc" "*.cpp" "*.cxx" "*.C"';  fi
-if [ "x$ext" = "xunknown" ]; then echo "unknown extension type, try <c_and_cpp|java|python|...>"; exit 1; fi
+if [ ! -d $DIR/.git ]; then echo "$2 must be a git repo directory"; exit 1; fi
 
 
 cd $DIR
 
-if [ ! -f all-hashes.txt ]; then
-  echo "getting all commit hashes and commit messages..."
-  git log --format="%h %s" > all-hashes.txt
+if [ ! -f $ALL_HASHES ]; then
+  echo "getting all commit hashes and commit messages... ($ALL_HASHES)"
+  git log --format="%h %s" > $ALL_HASHES
 fi
 
 # explicit /bin/rm for macOS
@@ -41,26 +42,27 @@ mkdir -p $CLEANDIR
 mkdir -p $FIXDIR
 if [ ! -f $CLEANDIR/hashes.txt ]; then
   echo "scanning for clean commits ==> $CLEANDIR/hashes.txt"
-  perl -ane 'next if / Merge/; print if m@^[0-9a-z/-]+ ([#]?[a-z0-9]+: *)*(adds?|adding|added|use|update|implement|removed?|switch|split|refactor|make|improve|simplify|optimize|create|disable|handle|change|allow|clean|cleanup|drop|document|move|more|adjust|convert|perf|rename|replace|introduce|support):? @i;' < all-hashes.txt | sort > $CLEANDIR/hashes.txt
+  perl -ane 'next if / Merge/; print if m@^[0-9a-z/-]+ ([#]?[a-z0-9]+: *)*(adds?|adding|added|use|update|implement|removed?|switch|split|refactor|make|improve|simplify|optimize|create|disable|handle|change|allow|clean|cleanup|drop|document|move|more|adjust|convert|perf|rename|replace|introduce|support):? @i;' < $ALL_HASHES | sort > $CLEANDIR/hashes.txt
 fi
 if [ ! -f $FIXDIR/hashes.txt ]; then
   echo "scanning for bugfix commits ==> $FIXDIR/hashes.txt"
   # fix includes "bugfix"
   # MDEV is for mariadb/mysql
-  perl -ane 'next if / Merge/; print if /[^a-z](fix|fixed|fixes|revert|MDEV-)[^a-z]/i; ' < all-hashes.txt | sort > $FIXDIR/hashes.txt
+  perl -ane 'next if / Merge/; print if /[^a-z](fix|fixed|fixes|revert|MDEV-)[^a-z]/i; ' < $ALL_HASHES | sort > $FIXDIR/hashes.txt
 fi
 
-any_fix_chgs=0
+num_fix_chgs=0
 for h in `perl -ane 'print "$F[0]\n"' < $FIXDIR/hashes.txt`; do
   if [ ! -f "$FIXDIR/commit-$h.txt" ]; then
-    if [ "x$any_fix_chgs" == "x0" ]; then echo -n "fetching fix commits: "; fi
-    if [ "x$DBG" == "x1" ]; then echo $FIXDIR/commit-$h.txt; else echo -n "."; fi
-    ../../get-one-commit.sh $h $ext > $FIXDIR/commit-$h.txt;
-    any_fix_chgs=1
+    if [ "x$num_fix_chgs" == "x0" ]; then echo -n "fetching fix commits: "; fi
+    if [ "x$DBG" == "x1" ]; then echo "$GET_ONE_COMMIT $h $ext > $FIXDIR/commit-$h.txt";
+    elif (( $num_fix_chgs % 100 == 0 )); then echo -n "."; fi
+    $GET_ONE_COMMIT $h $FILETYPE > $FIXDIR/commit-$h.txt
+    num_fix_chgs=$((num_fix_chgs+1))
   fi
 done
 # set file mod time for githubLabeledTrainData.tsv below
-if [ "x$any_fix_chgs" = "x1" ]; then echo ""; touch $FIXDIR/hashes.txt; fi
+if [[ $num_fix_chgs -gt 0 ]]; then echo ""; touch $FIXDIR/hashes.txt; fi
 
 # experimental removal of fix-hashes that are later implicated in bugfixes...
 # requires https://github.com/dmnd/git-diff-blame (with modification for git show vs diff...)
@@ -83,17 +85,18 @@ hashes=$CLEANDIR/hashes.txt
 if [ -f $CLEANDIR/hashes-clean.txt ]; then
     hashes=$CLEANDIR/hashes-clean.txt
 fi
-any_clean_chgs=0
+num_clean_chgs=0
 for h in `perl -ane 'print "$F[0]\n"' < $hashes`; do
   if [ ! -f "$CLEANDIR/commit-$h.txt" ]; then
-    if [ "x$any_clean_chgs" == "x0" ]; then echo -n "fetching clean commits: "; fi
-    if [ "x$DBG" == "x1" ]; then echo $CLEANDIR/commit-$h.txt; else echo -n "."; fi
-    ../../get-one-commit.sh $h $ext > $FIXDIR/commit-$h.txt;
-    any_clean_chgs=1
+    if [ "x$num_clean_chgs" == "x0" ]; then echo -n "fetching clean commits: "; fi
+    if [ "x$DBG" == "x1" ]; then echo "$GET_ONE_COMMIT $h $ext > $CLEANDIR/commit-$h.txt";
+    elif (( $num_clean_chgs % 100 == 0 )); then echo -n "."; fi
+    $GET_ONE_COMMIT $h $FILETYPE > $CLEANDIR/commit-$h.txt
+    num_clean_chgs=$((num_clean_chgs+1))
   fi
 done
 # set file mod time for githubLabeledTrainData.tsv below
-if [ "x$any_clean_chgs" = "x1" ]; then echo ""; touch $CLEANDIR/hashes.txt; fi
+if [[ $num_clean_chgs -gt 0 ]]; then echo ""; touch $CLEANDIR/hashes.txt; fi
 
 # if githubLabeledTrainData.tsv needs refreshing
 if [ "x$DBG" == "x1" ]; then ls -l githubLabeledTrainData.tsv $CLEANDIR/hashes.txt $FIXDIR/hashes.txt; fi
