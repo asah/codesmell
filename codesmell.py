@@ -6,14 +6,29 @@
 #
 #    cd <language>/<repo>; ../../get-all-hashes.sh <language>
 #    cd ..; cat */git | gzip -9 > githubLabeledTrainData-augmented.tsv.gz
-#    python codesmell.py train      (defaults to githubLabeledTrainData-augmented.tsv.gz)
+#    nohup python codesmell.py train &      (defaults to githubLabeledTrainData-augmented.tsv.gz)
+#    tail -f nohup.out    # avoid losing the session.  I'm old school, screen/tmux/etc
+#    ... immediate ...
+#    (check for errors, incl GPU not being found)
+#    (look for 50+% training accuracy and <1.0 training "loss")
+#    ... 15 minutes ...
+#    (training accuracy should increase a bit, training "loss" should decrease a bit)
+#    (estimated completion time should stabilize - on my hardware, it's ~60-120mins/epoch; set an alarm)
+#    ... when your alarm goes off ...
+#    (look at the results for epoch 1: should be 60+% validation accuracy and <0.75 validation "loss")
+#    ... hours-days pass ...
+#    (look at the results for epoch ~5-10: should be 70+% validation accuracy and <0.60 validation "loss")
 #    ... days pass ...
-#    <ctrl-C>
-#    ls -l checkpoints/*hdf5       (look for the latest one)
+#    (results should stabilize - the CodeSmell neural net is nicely behaved and doesn't make wild jumps)
+#    <hit ctrl-C to stop it>
+#    ls -lt checkpoints/*hdf5 | head -1      # get latest saved model-- pass to codesmell -c <hdf5 file> predict
 #
-# typical single-file predicgion (on codesmell itself!)
-# typical single-file predicgion (on codesmell itself!)
+# typical single-file prediction
 #
+#    cd <git directory>    # in this example, I use java/activemq
+#    
+#    
+# typical batch prediction
 #
 #
 # note: for simplicity, codesmell is intentionally a single source file, and will split
@@ -116,7 +131,9 @@ def parse_args():
     parser.add_argument("--details", action=ActionYesNo, default=True,
                         help="display per-commit details")
     parser.add_argument("--array", action=ActionYesNo, default=True,
-                        help="display array of thresholds")
+                        help="display array of forecasts, one per commit")
+    parser.add_argument("--threshold", type=float, default=0.3,
+                        help="default threshold (0.0-1.0) for determining is-smelly")
     parser.add_argument("--confusion", action=ActionYesNo, default=False,
                         help="print a confusion matrix")
     parser.add_argument("--saliency", action=ActionYesNo, default=False,
@@ -226,7 +243,7 @@ def load_raw_commits():
         print("reading from {}...".format("stdin" if fh == sys.stdin else ARGS.filename))
         for line in fh:
             # ignore header rows, which is esp helpful when concatenating TSV files from multiple repos,
-            # e.g. cat c_and_cpp/*/gith*tsv | ../augment-codesmell-data.py | gzip -9 > githubLabeledTrainData-augmented.tsv.gz
+            # e.g. cat c_and_cpp/*/gith*tsv | ../augment-c_and_cpp.py | pigz -9 > githubLabeledTrainData-augmented.tsv.gz
 	    if re.search(r'id\tsentiment', line): continue
             # ignore tiny commits
 	    if len(line) < 20: continue
@@ -443,7 +460,8 @@ if __name__ == '__main__':
     elif ARGS.action == 'predict':
         res = model.predict(x_train, ARGS.batch_size, verbose=1)
         res = (res * 100.0).flatten().tolist()
-        threshold = 30.0
+        threshold = 100.0 * ARGS.threshold
+        print("threshold:", threshold)
         confusion={}
         num_smelly = num_clean = 0
         for i, commit in enumerate(commits):
@@ -452,18 +470,19 @@ if __name__ == '__main__':
                 print("{:3.0f}% smelly, L{}: {}".format(res[i], LINENUM_BY_SALIENCY_HASH[hash], strpoem(LINE_BY_SALIENCY_HASH[hash])))
             elif ARGS.details:
                 print("{:3.0f}% smelly, actual={}: {}: {}...".format(res[i], sentiments[i], hash, strpoem("\\n".join(commit))))
-            if int(sentiments[i]) > 0:
-                num_smelly += 1
-                if res[i] > threshold:
-                    confusion['is_smelly_forecast_smelly'] = confusion.get('is_smelly_forecast_smelly', 0) + 1
+            if ARGS.confusion:
+                if int(sentiments[i]) > 0:
+                    num_smelly += 1
+                    if res[i] > threshold:
+                        confusion['is_smelly_forecast_smelly'] = confusion.get('is_smelly_forecast_smelly', 0) + 1
+                    else:
+                        confusion['is_smelly_forecast_clean'] = confusion.get('is_smelly_forecast_clean', 0) + 1
                 else:
-                    confusion['is_smelly_forecast_clean'] = confusion.get('is_smelly_forecast_clean', 0) + 1
-            else:
-                num_clean += 1
-                if res[i] > threshold:
-                    confusion['is_clean_forecast_smelly'] = confusion.get('is_clean_forecast_smelly', 0) + 1
-                else:
-                    confusion['is_clean_forecast_clean'] = confusion.get('is_clean_forecast_clean', 0) + 1
+                    num_clean += 1
+                    if res[i] > threshold:
+                        confusion['is_clean_forecast_smelly'] = confusion.get('is_clean_forecast_smelly', 0) + 1
+                    else:
+                        confusion['is_clean_forecast_clean'] = confusion.get('is_clean_forecast_clean', 0) + 1
         if ARGS.array:
             if len(commits) == 1:
                 print("forecast={} ({}%)".format("smelly" if res[0]>threshold else "clean", res[0]))
@@ -473,9 +492,9 @@ if __name__ == '__main__':
         if ARGS.confusion:
             isfs = confusion.get('is_smelly_forecast_smelly', 0)
             isfc = confusion.get('is_smelly_forecast_clean', 0)
-            print("is-smelly: {}.  forecast-smelly: {} ({:.1f}%), forecast-clean: {} ({:.1f}%)".format(
-                num_smelly, isfs, 100.0*isfs/num_smelly if num_smelly>0 else 0, isfc, 100.0*isfc/num_smelly if num_smelly>0 else 0))
             icfs = confusion.get('is_clean_forecast_smelly', 0)
             icfc = confusion.get('is_clean_forecast_clean', 0)
+            print("is-smelly: {}.  forecast-smelly: {} ({:.1f}%), forecast-clean: {} ({:.1f}%)".format(
+                num_smelly, isfs, 100.0*isfs/num_smelly if num_smelly>0 else 0, isfc, 100.0*isfc/num_smelly if num_smelly>0 else 0))
             print("is-clean:  {}.  forecast-smelly: {} ({:.1f}%), forecast-clean: {} ({:.1f}%)".format(
                 num_clean, icfs, 100.0*icfs/num_clean if num_clean>0 else 0, icfc, 100.0*icfc/num_clean if num_clean>0 else 0))
