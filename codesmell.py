@@ -128,9 +128,9 @@ def parse_args():
     parser.add_argument("--raw", action=ActionYesNo, default=False,
                         help=("(action=predict) assume input is raw text instead of tab-separated commit triplets."+
                               "  sets--max-len-per-line=200 and  --max-lines-per-commit=5000"))
-    parser.add_argument("--details", action=ActionYesNo, default=True,
+    parser.add_argument("--details", action=ActionYesNo, default=False,
                         help="display per-commit details")
-    parser.add_argument("--array", action=ActionYesNo, default=True,
+    parser.add_argument("--array", action=ActionYesNo, default=False,
                         help="display array of forecasts, one per commit")
     parser.add_argument("--threshold", type=float, default=0.3,
                         help="default threshold (0.0-1.0) for determining is-smelly")
@@ -237,6 +237,8 @@ def load_raw_commits():
             fh = gzip.open(ARGS.filename, 'rb')
         elif re.search(r'bz2$', ARGS.filename):
             fh = bz2.open(ARGS.filename, 'rb')
+        elif re.search(r'tsv$', ARGS.filename):
+            fh = open(ARGS.filename, 'rb')
         else:
             print("-f: unknown input type: use - for stdin, <filename>.gz for gzip or <filename>.bz2 for bzip")
             sys.exit(1)
@@ -332,14 +334,30 @@ def load_commits():
             print('sample chars in x:{}'.format(x[example_commit_idx, 2]))
             print('y:{}'.format(y[example_commit_idx]))
             print('randomly shuffling the input records and splitting training vs validation...')
+        
         ids = np.arange(len(x))
-        np.random.shuffle(ids)
-        x = x[ids]
-        y = y[ids]
-        x_train = x[:divider]
-        x_test = x[divider:]
-        y_train = y[:divider]
-        y_test = y[divider:]
+        ids_augmented_first = []
+        # don't use augmented commits (ending in beef") in validation
+        # (artificially increases training validation accuracy)
+        for id in ids:
+            if commit_hashes[id].endswith('beef"'):
+                ids_augmented_first.insert(0, id)
+            else:
+                ids_augmented_first.append(id)
+        ids_augmented_train = ids_augmented_first[:divider]
+        ids_augmented_test = ids_augmented_first[divider:]
+        np.random.shuffle(ids_augmented_train)
+        np.random.shuffle(ids_augmented_test)
+        commits = [commits[i] for i in (ids_augmented_train + ids_augmented_test)]
+        print("train:", [commit_hashes[i] for i in (ids_augmented_train)])
+        print("test:", [commit_hashes[i] for i in (ids_augmented_test)])
+        commit_hashes = [commit_hashes[i] for i in (ids_augmented_train + ids_augmented_test)]
+        sentiments = [sentiments[i] for i in (ids_augmented_train + ids_augmented_test)]
+        x_train = x[ids_augmented_train]
+        x_test = x[ids_augmented_test]
+        y_train = y[ids_augmented_train]
+        y_test = y[ids_augmented_test]
+        print(commits[0], commit_hashes[0], sentiments[0], x_train[0], y_train[0])
         return commits, commit_hashes, sentiments, x_train, x_test, y_train, y_test
 
     if ARGS.action == 'predict':
@@ -459,35 +477,35 @@ if __name__ == '__main__':
                   epochs=250, shuffle=True, callbacks=[check_cb])
     elif ARGS.action == 'predict':
         res = model.predict(x_train, ARGS.batch_size, verbose=1)
-        res = (res * 100.0).flatten().tolist()
-        threshold = 100.0 * ARGS.threshold
-        print("threshold:", threshold)
+        res = res.flatten().tolist()
+        print("threshold:", ARGS.threshold)
         confusion={}
         num_smelly = num_clean = 0
         for i, commit in enumerate(commits):
             hash = commit_hashes[i]
             if ARGS.saliency and is_saliency_hash(hash):
-                print("{:3.0f}% smelly, L{}: {}".format(res[i], LINENUM_BY_SALIENCY_HASH[hash], strpoem(LINE_BY_SALIENCY_HASH[hash])))
+                print("{:3.0f}% smelly, L{}: {}".format(100.0*res[i], LINENUM_BY_SALIENCY_HASH[hash], strpoem(LINE_BY_SALIENCY_HASH[hash])))
             elif ARGS.details:
-                print("{:3.0f}% smelly, actual={}: {}: {}...".format(res[i], sentiments[i], hash, strpoem("\\n".join(commit))))
+                print("{:3.0f}% smelly, actual={}: {}: {}...".format(100.0*res[i], sentiments[i], hash, strpoem("\\n".join(commit))))
             if ARGS.confusion:
                 if int(sentiments[i]) > 0:
                     num_smelly += 1
-                    if res[i] > threshold:
+                    if res[i] > ARGS.threshold:
                         confusion['is_smelly_forecast_smelly'] = confusion.get('is_smelly_forecast_smelly', 0) + 1
                     else:
                         confusion['is_smelly_forecast_clean'] = confusion.get('is_smelly_forecast_clean', 0) + 1
                 else:
                     num_clean += 1
-                    if res[i] > threshold:
+                    if res[i] > ARGS.threshold:
                         confusion['is_clean_forecast_smelly'] = confusion.get('is_clean_forecast_smelly', 0) + 1
                     else:
                         confusion['is_clean_forecast_clean'] = confusion.get('is_clean_forecast_clean', 0) + 1
         if ARGS.array:
             if len(commits) == 1:
-                print("forecast={} ({}%)".format("smelly" if res[0]>threshold else "clean", res[0]))
+                print("forecast={} ({}%)".format("smelly" if res[0]>ARGS.threshold else "clean", res[0]))
             else:
-                print("{} smelly. Forecasts: {}".format(100.0*num_smelly/len(res), " ".join(["{:2.0f}".format(x) for x in res])))
+                print("{}/{} are smelly ({}%). Forecasts: {}".format(num_smelly, len(res), 100.0*num_smelly/len(res),
+                                                                     " ".join(["{:.3f}".format(x) for x in res])))
             
         if ARGS.confusion:
             isfs = confusion.get('is_smelly_forecast_smelly', 0)
