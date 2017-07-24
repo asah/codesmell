@@ -115,6 +115,8 @@ def parse_args():
                         help="batch size, in number of commits  (action=train)")
     parser.add_argument("-c", "--use-checkpoint",
                         help="start from this checkpoint file (action=train or predict)")
+    parser.add_argument("--ngrams",
+                        help="read ngrams from this file")
     # TODO: breaking on challenges with the Lambda
     #parser.add_argument("-m", "--model",
     #help="start from this model file (JSON) (action=train or predict)")
@@ -128,9 +130,9 @@ def parse_args():
     parser.add_argument("--raw", action=ActionYesNo, default=False,
                         help=("(action=predict) assume input is raw text instead of tab-separated commit triplets."+
                               "  sets--max-len-per-line=200 and  --max-lines-per-commit=5000"))
-    parser.add_argument("--details", action=ActionYesNo, default=True,
+    parser.add_argument("--details", action=ActionYesNo, default=False,
                         help="display per-commit details")
-    parser.add_argument("--array", action=ActionYesNo, default=True,
+    parser.add_argument("--array", action=ActionYesNo, default=False,
                         help="display array of forecasts, one per commit")
     parser.add_argument("--threshold", type=float, default=0.3,
                         help="default threshold (0.0-1.0) for determining is-smelly")
@@ -201,6 +203,16 @@ def parse_args():
     if args.test:
         args.max_commits = 5000  # override
 
+    if args.ngrams:
+        # ngrams compress each line a lot, which means we can analyze more lines per commit
+        args.max_len_per_line = int(args.max_len_per_line * 0.85)
+        args.max_lines_per_commit = int(args.max_lines_per_commit * 1.15)
+        
+        # popular four char ngrams
+        # note that we still need single chars to encode the less-popular ngrams
+        args.ngrams_data = dict(enumerate([line[0:4] for line in open(args.ngrams).readlines()])) if args.ngrams else {}
+        print("found ngrams:", args.ngrams_data)
+
     return args
 
 def get_gpu_ram_mb():
@@ -212,11 +224,10 @@ def get_gpu_ram_mb():
     except:
         return 0
     
-def binarize(x, sz=97):
-    import tensorflow as tf2
-    return tf2.to_float(tf2.one_hot(x, sz, on_value=1, off_value=0, axis=-1))
+def binarize(x, sz=200):
+    return tf.to_float(tf.one_hot(x, sz, on_value=1, off_value=0, axis=-1))
 
-def binarize_outshape(in_shape, sz=97):
+def binarize_outshape(in_shape, sz=200):
     return in_shape[0], in_shape[1], sz
 
 def is_saliency_hash(hash):
@@ -237,6 +248,8 @@ def load_raw_commits():
             fh = gzip.open(ARGS.filename, 'rb')
         elif re.search(r'bz2$', ARGS.filename):
             fh = bz2.open(ARGS.filename, 'rb')
+        elif re.search(r'tsv$', ARGS.filename):
+            fh = open(ARGS.filename, 'rb')
         else:
             print("-f: unknown input type: use - for stdin, <filename>.gz for gzip or <filename>.bz2 for bzip")
             sys.exit(1)
@@ -307,6 +320,11 @@ def load_commits():
         print('using charset: {} => {}'.format(len(chars), "".join(sorted(list(chars)))))
     char_indices = dict((c, i) for i, c in enumerate(chars))
     indices_char = dict((i, c) for i, c in enumerate(chars))
+    if ARGS.ngrams:
+        for idx, val in ARGS.ngrams_data.items():
+            indices_char[len(chars) + idx] = val
+            char_indices[val] = len(chars) + idx
+            print("indices_char[{} + {}] = {}".format(len(chars), idx, val))
     example_commit_idx = min(1200, len(commits)-1)
     if not ARGS.use_checkpoint:
         print('total commits:{}, {} training, {} validation, ARGS.batch_size: {}, sample commit: {}'.format(
@@ -318,28 +336,76 @@ def load_commits():
     x = np.ones((len(commits), ARGS.max_lines_per_commit, ARGS.max_len_per_line), dtype=np.int64) * -1
     y = np.array(sentiments)
 
+    # TODO: improve performance?
     if not ARGS.use_checkpoint:
         print('encoding each character...')
-    # TODO: improve performance?
+    longer_encodings = total_chars = truncated_lines = 0
+    idx_popularity = dict( (idx, 0) for idx in indices_char.keys() )
     for i, commit in enumerate(commits):
-        if i > 0 and i % 25000 == 0: print ' ',i, "..."
-        for j, line_of_code in enumerate(commit):
+        if i > 0 and i % 50000 == 0: print ' ',i, "..."
+        for j, line in enumerate(commit):
+            if i == 0 and j == 0:
+                print(line)
             if j < ARGS.max_lines_per_commit:
-                for t, char in enumerate(line_of_code[-ARGS.max_len_per_line:]):
-                    x[i, j, (ARGS.max_len_per_line - 1 - t)] = char_indices.get(char, 0)  # \b for unknown
+                if ARGS.ngrams and i==0 and j==0: print ARGS.ngrams_data
+                srcidx = 0
+                destidx = 0
+                encoded_line = []
+                while srcidx < len(line) and destidx < ARGS.max_len_per_line:
+                    s = line[srcidx:srcidx+4]  # won't be found if at the end i.e. <4 chars
+                    if i==0 and j==0:
+                        if srcidx==0:
+                            print line
+                        print s,
+                    if s in char_indices:
+                        longer_encodings += 1
+                        idx = char_indices[s]
+                        srcidx += 4
+                        if i==0 and j==0: print(s, "==>", idx)
+                    else:
+                        char = line[srcidx]
+                        idx = char_indices.get(char, 0)  # default to backspace
+                        srcidx += 1
+                        if i==0 and j==0: print(repr(char), "==>", idx)
+                    idx_popularity[idx] += 1
+                    total_chars += 1
+                    x[i, j, (ARGS.max_len_per_line - 1 - destidx)] = idx
+                    destidx += 1
+                    if destidx == ARGS.max_len_per_line and srcidx < len(line):
+                        truncated_lines += 1
+    print "truncated_lines:", truncated_lines, "longer_encodings:", longer_encodings, "total chars:", total_chars
+    print "popularity:", " ".join([ "{}[{}]:{}".format(indices_char[idx], idx, pop)
+                                    for idx, pop in sorted(idx_popularity.items(), key=lambda x: x[1], reverse=True)])
+    
     if ARGS.action == 'train':
         if not ARGS.use_checkpoint:
             print('sample chars in x:{}'.format(x[example_commit_idx, 2]))
             print('y:{}'.format(y[example_commit_idx]))
             print('randomly shuffling the input records and splitting training vs validation...')
+        
         ids = np.arange(len(x))
-        np.random.shuffle(ids)
-        x = x[ids]
-        y = y[ids]
-        x_train = x[:divider]
-        x_test = x[divider:]
-        y_train = y[:divider]
-        y_test = y[divider:]
+        ids_augmented_first = []
+        # don't use augmented commits (ending in beef") in validation
+        # (artificially increases training validation accuracy)
+        for id in ids:
+            if commit_hashes[id].endswith('beef"'):
+                ids_augmented_first.insert(0, id)
+            else:
+                ids_augmented_first.append(id)
+        ids_augmented_train = ids_augmented_first[:divider]
+        ids_augmented_test = ids_augmented_first[divider:]
+        np.random.shuffle(ids_augmented_train)
+        np.random.shuffle(ids_augmented_test)
+        commits = [commits[i] for i in (ids_augmented_train + ids_augmented_test)]
+        #print("train:", [commit_hashes[i] for i in (ids_augmented_train)])
+        #print("test:", [commit_hashes[i] for i in (ids_augmented_test)])
+        commit_hashes = [commit_hashes[i] for i in (ids_augmented_train + ids_augmented_test)]
+        sentiments = [sentiments[i] for i in (ids_augmented_train + ids_augmented_test)]
+        x_train = x[ids_augmented_train]
+        x_test = x[ids_augmented_test]
+        y_train = y[ids_augmented_train]
+        y_test = y[ids_augmented_test]
+        #print(commits[0], commit_hashes[0], sentiments[0], x_train[0], y_train[0])
         return commits, commit_hashes, sentiments, x_train, x_test, y_train, y_test
 
     if ARGS.action == 'predict':
@@ -459,35 +525,35 @@ if __name__ == '__main__':
                   epochs=250, shuffle=True, callbacks=[check_cb])
     elif ARGS.action == 'predict':
         res = model.predict(x_train, ARGS.batch_size, verbose=1)
-        res = (res * 100.0).flatten().tolist()
-        threshold = 100.0 * ARGS.threshold
-        print("threshold:", threshold)
+        res = res.flatten().tolist()
+        print("threshold:", ARGS.threshold)
         confusion={}
         num_smelly = num_clean = 0
         for i, commit in enumerate(commits):
             hash = commit_hashes[i]
             if ARGS.saliency and is_saliency_hash(hash):
-                print("{:3.0f}% smelly, L{}: {}".format(res[i], LINENUM_BY_SALIENCY_HASH[hash], strpoem(LINE_BY_SALIENCY_HASH[hash])))
+                print("{:3.0f}% smelly, L{}: {}".format(100.0*res[i], LINENUM_BY_SALIENCY_HASH[hash], strpoem(LINE_BY_SALIENCY_HASH[hash])))
             elif ARGS.details:
-                print("{:3.0f}% smelly, actual={}: {}: {}...".format(res[i], sentiments[i], hash, strpoem("\\n".join(commit))))
+                print("{:3.0f}% smelly, actual={}: {}: {}...".format(100.0*res[i], sentiments[i], hash, strpoem("\\n".join(commit))))
             if ARGS.confusion:
                 if int(sentiments[i]) > 0:
                     num_smelly += 1
-                    if res[i] > threshold:
+                    if res[i] > ARGS.threshold:
                         confusion['is_smelly_forecast_smelly'] = confusion.get('is_smelly_forecast_smelly', 0) + 1
                     else:
                         confusion['is_smelly_forecast_clean'] = confusion.get('is_smelly_forecast_clean', 0) + 1
                 else:
                     num_clean += 1
-                    if res[i] > threshold:
+                    if res[i] > ARGS.threshold:
                         confusion['is_clean_forecast_smelly'] = confusion.get('is_clean_forecast_smelly', 0) + 1
                     else:
                         confusion['is_clean_forecast_clean'] = confusion.get('is_clean_forecast_clean', 0) + 1
         if ARGS.array:
             if len(commits) == 1:
-                print("forecast={} ({}%)".format("smelly" if res[0]>threshold else "clean", res[0]))
+                print("forecast={} ({}%)".format("smelly" if res[0]>ARGS.threshold else "clean", res[0]))
             else:
-                print("{} smelly. Forecasts: {}".format(100.0*num_smelly/len(res), " ".join(["{:2.0f}".format(x) for x in res])))
+                print("{}/{} are smelly ({}%). Forecasts: {}".format(num_smelly, len(res), 100.0*num_smelly/len(res),
+                                                                     " ".join(["{:.3f}".format(x) for x in res])))
             
         if ARGS.confusion:
             isfs = confusion.get('is_smelly_forecast_smelly', 0)
